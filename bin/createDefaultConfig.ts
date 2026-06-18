@@ -26,7 +26,8 @@ export function createDefaultConfig(): WaterwayConfig {
             ignoreSearchTerms: false,
             maxResults: 10,
             removeExtraFilters: false,
-            requireExactMatches: true
+            requireExactMatches: true,
+            filterTags: []
         },
         plugins: {
             loadDirectory: true
@@ -52,6 +53,8 @@ export function createDefaultConfig(): WaterwayConfig {
             },
             gameCodes: "v2",
             enforceSettings: {},
+            allowedGameModes: [],
+            defaultGameMode: 1,
             authoritativeServer: false,
             advanced: {
                 unknownObjects: false

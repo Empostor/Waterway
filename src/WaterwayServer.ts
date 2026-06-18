@@ -87,6 +87,7 @@ import { LoadedPlugin, PluginLoader, WorkerPlugin } from "./handlers";
 import i18n from "./i18n";
 import { Matchmaker } from "./Matchmaker";
 import { Logger } from "./Logger";
+import { GameOptionsValidator } from "./game/GameOptions";
 
 const byteSizes = ["bytes", "kb", "mb", "gb", "tb"];
 function formatBytes(bytes: number) {
@@ -249,6 +250,21 @@ export type LoggingConfig = {
 
 export type ValidSearchTerm = "map" | "chat" | "chatType";
 
+export type FilterTagConfig = {
+    /**
+     * The internal name/key for this filter tag.
+     */
+    name: string;
+    /**
+     * The display name shown to users.
+     */
+    displayName: string;
+    /**
+     * Optional icon identifier for the tag.
+     */
+    icon?: string;
+};
+
 export type GameListingConfig = {
     /**
      * Whether to ignore the privacy of a room, and return even private ones.
@@ -278,6 +294,12 @@ export type GameListingConfig = {
      * @default false
      */
     requireExactMatches: boolean;
+    /**
+     * Static filter tags to serve via the /api/filtertags endpoint.
+     * These appear as filter buttons in the client UI.
+     * @default []
+     */
+    filterTags: FilterTagConfig[];
 }
 
 export type ChatCommandConfig = {
@@ -373,8 +395,20 @@ export type RoomsConfig = StatefulRoomConfig & {
     gameCodes: "v1" | "v2";
     /**
      * Enforce certain settings, preventing the host from changing them.
+     * These settings are applied on room creation and cannot be overridden.
      */
     enforceSettings: Partial<AllGameSettings>;
+    /**
+     * Allowed game modes for rooms on this server. An empty array means all
+     * game modes are allowed.
+     * @default []
+     */
+    allowedGameModes: number[];
+    /**
+     * The default game mode for new rooms.
+     * @default 1 (Normal)
+     */
+    defaultGameMode: number;
     /**
      * Options regarding room plugins.
      */
@@ -1506,6 +1540,14 @@ export class WaterwayServer extends EventEmitter<WaterwayServerEvents> {
 
         if (ev.canceled)
             return;
+
+        const validationResult = GameOptionsValidator.validateGameSettingsObject(message.gameSettings);
+        if (!validationResult.valid) {
+            this.logger.warn("%s created room with invalid game options: %s",
+                sender, validationResult.errors.join("; "));
+            await sender.disconnect("Invalid game options: " + validationResult.errors.join(", "));
+            return;
+        }
 
         const room = await this.createRoom(ev.alteredRoomCode, message.gameSettings, sender);
 

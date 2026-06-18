@@ -7,10 +7,10 @@ import * as crypto from "crypto";
 import * as KoaRouter from "@koa/router";
 import { HazelWriter } from "@skeldjs/hazel";
 import { RoomCode, Version } from "@skeldjs/au-client";
-import { DisconnectReason, Filters, GameKeyword, GameMap, GameMode, Platform, QuickChatMode, StringName } from "@skeldjs/au-core";
+import { DisconnectReason, Filters, GameKeyword, GameMap, GameMode, GameState, Platform, QuickChatMode, StringName } from "@skeldjs/au-core";
 
 import { WaterwayServer } from "./WaterwayServer";
-import { Room, RoomPrivacy } from "./Room";
+import { Room, RoomPrivacy, logMaps } from "./Room";
 import { Logger } from "./Logger";
 
 export type GameListingJson = {
@@ -39,6 +39,31 @@ export type GameFoundByCodeJson = {
     Game: GameListingJson | null;
     Region: number;
     UntranslatedRegion: string;
+}
+
+export type PlayerListingJson = {
+    ClientId: number;
+    Username: string;
+    Color: number;
+    HatId: string;
+    SkinId: string;
+    VisorId: string;
+    IsHost: boolean;
+    IsDead: boolean;
+}
+
+export type GameInfoJson = GameListingJson & {
+    Players: PlayerListingJson[];
+    GameState: string;
+    GameMode: string;
+    Privacy: string;
+}
+
+export type FilterTagJson = {
+    Name: string;
+    DisplayName: string;
+    Type: string;
+    Count: number;
 }
 
 export type MatchmakerTokenPayload = {
@@ -367,6 +392,252 @@ export class Matchmaker {
                 router[method](route, body.bind(loadedPlugin.pluginInstance) as any);
             }
         }
+
+        // ── Root / Home Page ──
+        router.get("/", async (ctx) => {
+            const totalPlayers = [...this.server.connections.values()].filter(c => c.room).length;
+            const totalConnections = this.server.connections.size;
+            const totalRooms = this.server.rooms.size;
+
+            const publicRooms = [...this.server.rooms.values()]
+                .filter(r => r.privacy === RoomPrivacy.Public);
+
+            const roomRows = publicRooms.slice(0, 20).map(room => {
+                const mapName = logMaps[room.settings.map] || GameMap[room.settings.map] || "Unknown";
+                const modeName = GameMode[room.settings.gameMode] || "Normal";
+                const stateName = GameState[room.gameState] || "Lobby";
+                const roomAge = Math.floor((Date.now() - room.createdAt) / 1000);
+                const ageStr = roomAge < 60 ? `${roomAge}s` : `${Math.floor(roomAge / 60)}m`;
+
+                return `<tr>
+                    <td><code>${room.code}</code></td>
+                    <td>${room.roomName}</td>
+                    <td>${room.players.size}/${room.settings.maxPlayers}</td>
+                    <td>${mapName}</td>
+                    <td>${modeName}</td>
+                    <td>${stateName}</td>
+                    <td>${ageStr}</td>
+                </tr>`;
+            }).join("");
+
+            const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Waterway — Among Us Server</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            min-height: 100vh;
+        }
+        header {
+            background: linear-gradient(135deg, #161b22 0%, #1a2332 100%);
+            border-bottom: 1px solid #30363d;
+            padding: 32px 24px;
+            text-align: center;
+        }
+        header h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            background: linear-gradient(90deg, #58a6ff, #3fb950);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        header p {
+            color: #8b949e;
+            margin-top: 8px;
+            font-size: 0.95rem;
+        }
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 32px;
+            margin: 24px auto 0;
+            flex-wrap: wrap;
+        }
+        .stat-card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 16px 28px;
+            text-align: center;
+            min-width: 120px;
+        }
+        .stat-card .num {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #58a6ff;
+        }
+        .stat-card .label {
+            font-size: 0.8rem;
+            color: #8b949e;
+            margin-top: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        main {
+            max-width: 960px;
+            margin: 32px auto;
+            padding: 0 16px;
+        }
+        h2 {
+            font-size: 1.2rem;
+            color: #e6edf3;
+            margin-bottom: 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #30363d;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+        th {
+            text-align: left;
+            padding: 10px 12px;
+            background: #161b22;
+            color: #8b949e;
+            font-weight: 600;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+            border-bottom: 1px solid #30363d;
+        }
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #21262d;
+        }
+        tr:hover td { background: #161b22; }
+        code {
+            background: #21262d;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            color: #d2a8ff;
+            letter-spacing: 2px;
+        }
+        .empty {
+            text-align: center;
+            color: #8b949e;
+            padding: 40px 0;
+        }
+        footer {
+            text-align: center;
+            padding: 24px;
+            color: #484f58;
+            font-size: 0.8rem;
+            border-top: 1px solid #30363d;
+            margin-top: 48px;
+        }
+        .endpoints {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 12px;
+            margin-top: 16px;
+        }
+        .ep {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 12px 16px;
+        }
+        .ep .method {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            margin-right: 8px;
+        }
+        .ep .method.get  { background: #1b3a1b; color: #3fb950; }
+        .ep .method.post { background: #1b2d4a; color: #58a6ff; }
+        .ep .method.put  { background: #3a2e0e; color: #d29922; }
+        .ep .path { font-family: monospace; font-size: 0.85rem; color: #e6edf3; }
+        .ep .desc { font-size: 0.78rem; color: #8b949e; margin-top: 4px; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>⚓ Waterway</h1>
+        <p>Among Us Custom Server &mdash; v${WaterwayServer.serverVersion}</p>
+        <div class="stats">
+            <div class="stat-card">
+                <div class="num">${totalRooms}</div>
+                <div class="label">Rooms</div>
+            </div>
+            <div class="stat-card">
+                <div class="num">${totalPlayers}</div>
+                <div class="label">Players In-Game</div>
+            </div>
+            <div class="stat-card">
+                <div class="num">${totalConnections}</div>
+                <div class="label">Connections</div>
+            </div>
+            <div class="stat-card">
+                <div class="num">${this.server.loadedPlugins.size}</div>
+                <div class="label">Plugins</div>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <h2>📡 Active Rooms</h2>
+        ${roomRows
+            ? `<table>
+                <thead><tr>
+                    <th>Code</th><th>Host</th><th>Players</th><th>Map</th><th>Mode</th><th>State</th><th>Age</th>
+                </tr></thead>
+                <tbody>${roomRows}</tbody>
+            </table>`
+            : `<div class="empty">No active rooms. Host a game to get started!</div>`}
+
+        <h2 style="margin-top: 40px;">🔌 API Endpoints</h2>
+        <div class="endpoints">
+            <div class="ep">
+                <span class="method get">GET</span><span class="path">/</span>
+                <div class="desc">This page — server overview</div>
+            </div>
+            <div class="ep">
+                <span class="method post">POST</span><span class="path">/api/user</span>
+                <div class="desc">Get a matchmaker authentication token</div>
+            </div>
+            <div class="ep">
+                <span class="method get">GET</span><span class="path">/api/games/:id</span>
+                <div class="desc">Get detailed info for a specific room</div>
+            </div>
+            <div class="ep">
+                <span class="method get">GET</span><span class="path">/api/games/filtered</span>
+                <div class="desc">Search and filter public rooms</div>
+            </div>
+            <div class="ep">
+                <span class="method post">POST</span><span class="path">/api/games</span>
+                <div class="desc">Find host IP/port for a game code</div>
+            </div>
+            <div class="ep">
+                <span class="method get">GET</span><span class="path">/api/filters</span>
+                <div class="desc">List available search filters</div>
+            </div>
+            <div class="ep">
+                <span class="method get">GET</span><span class="path">/api/filtertags</span>
+                <div class="desc">Dynamic filter tags from active rooms</div>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        Waterway v${WaterwayServer.serverVersion} &middot; Cluster: ${this.server.config.clusterName} &middot; Node #${this.server.config.nodeId}
+    </footer>
+</body>
+</html>`;
+
+            ctx.type = "text/html";
+            ctx.status = 200;
+            ctx.body = html;
+        });
 
         router.post("/api/user", async (ctx) => {
             const body = (ctx.request as any).body;
@@ -713,9 +984,68 @@ export class Matchmaker {
         });
 
         router.get("/api/filtertags", ctx => {
-            // TODO: when does this get called?
+            // Build dynamic filter tags from active rooms
+            const tags: FilterTagJson[] = [];
+
+            // Map tags
+            const mapCounts: Record<string, number> = {};
+            const languageCounts: Record<string, number> = {};
+            const gameModeCounts: Record<string, number> = {};
+
+            for (const [, room] of this.server.rooms) {
+                if (room.privacy === RoomPrivacy.Private &&
+                    !this.server.config.gameListing.ignorePrivacy) {
+                    continue;
+                }
+
+                const mapName = logMaps[room.settings.map] || GameMap[room.settings.map] || "Unknown";
+                mapCounts[mapName] = (mapCounts[mapName] || 0) + 1;
+
+                const langName = GameKeyword[room.settings.keywords] || "Unknown";
+                languageCounts[langName] = (languageCounts[langName] || 0) + 1;
+
+                const modeName = GameMode[room.settings.gameMode] || "Normal";
+                gameModeCounts[modeName] = (gameModeCounts[modeName] || 0) + 1;
+            }
+
+            // Build map filter tags
+            for (const [name, count] of Object.entries(mapCounts)) {
+                tags.push({ Name: name, DisplayName: name, Type: "map", Count: count });
+            }
+
+            // Build language filter tags
+            for (const [name, count] of Object.entries(languageCounts)) {
+                tags.push({ Name: name, DisplayName: name, Type: "language", Count: count });
+            }
+
+            // Build game mode filter tags
+            for (const [name, count] of Object.entries(gameModeCounts)) {
+                tags.push({ Name: name, DisplayName: name, Type: "gameMode", Count: count });
+            }
+
+            // Include configured static filter tags from server config
+            const configuredTags = this.server.config.gameListing.filterTags;
+            if (configuredTags && Array.isArray(configuredTags)) {
+                for (const tag of configuredTags) {
+                    tags.push({
+                        Name: tag.name,
+                        DisplayName: tag.displayName,
+                        Type: "tag",
+                        Count: 0,
+                    });
+                }
+            } else {
+                // Default tags if none configured
+                tags.push(
+                    { Name: "Beginner", DisplayName: "Beginner Friendly", Type: "tag", Count: 0 },
+                    { Name: "Expert", DisplayName: "Expert", Type: "tag", Count: 0 },
+                    { Name: "Casual", DisplayName: "Casual", Type: "tag", Count: 0 },
+                    { Name: "Serious", DisplayName: "Serious", Type: "tag", Count: 0 },
+                );
+            }
+
             ctx.status = 200;
-            ctx.body = [];
+            ctx.body = tags;
         });
 
         router.get("/api/games/:game_id", ctx => {
@@ -735,13 +1065,81 @@ export class Matchmaker {
 
             this.logger.info("Client found room: %s", foundRoom);
 
+            // Build enhanced player listing
+            const players: PlayerListingJson[] = [];
+            for (const [, player] of foundRoom.players) {
+                const playerInfo = player.getPlayerInfo();
+                const connection = foundRoom.connections.get(player.clientId);
+                players.push({
+                    ClientId: player.clientId,
+                    Username: player.username || "Unknown",
+                    Color: playerInfo?.currentOutfit?.color ?? -1,
+                    HatId: playerInfo?.currentOutfit?.hatId ?? "",
+                    SkinId: playerInfo?.currentOutfit?.skinId ?? "",
+                    VisorId: playerInfo?.currentOutfit?.visorId ?? "",
+                    IsHost: foundRoom.authorityId === player.clientId ||
+                            (connection ? foundRoom.actingHosts.has(connection) : false),
+                    IsDead: playerInfo?.isDead ?? false,
+                });
+            }
+
+            const gameListing = this.getGameListing(ctx.socket.remoteAddress || "", foundRoom);
+            const gameInfo: GameInfoJson = {
+                ...gameListing,
+                Players: players,
+                GameState: GameState[foundRoom.gameState] || "Unknown",
+                GameMode: GameMode[foundRoom.settings.gameMode] || "Normal",
+                Privacy: foundRoom.privacy === RoomPrivacy.Public ? "Public" : "Private",
+            };
+
             ctx.status = 200;
             ctx.body = {
                 Errors: null,
-                Game: this.getGameListing(ctx.socket.remoteAddress || "", foundRoom),
+                Game: gameInfo,
                 Region: StringName.NoTranslation,
                 UntranslatedRegion: this.server.config.clusterName,
             } as GameFoundByCodeJson;
+        });
+
+        router.post("/api/games/:game_id/refresh", ctx => {
+            if (!this.verifyRequest(ctx)) {
+                ctx.status = 401;
+                return;
+            }
+
+            const gameCode = parseInt(ctx.params.game_id);
+            const foundRoom = this.server.rooms.get(gameCode);
+
+            if (!foundRoom) {
+                ctx.status = 404;
+                ctx.body = {
+                    Errors: [{ Reason: DisconnectReason[DisconnectReason.GameNotFound] }]
+                };
+                return;
+            }
+
+            // Refresh the room's filter-related metadata
+            // This allows hosts to update their room's visibility tags
+            const body = (ctx.request as any).body || {};
+
+            if (typeof body.privacy === "number") {
+                foundRoom.privacy = body.privacy === 1
+                    ? RoomPrivacy.Public
+                    : RoomPrivacy.Private;
+            }
+
+            if (typeof body.roomName === "string" && body.roomName.length > 0) {
+                foundRoom.setRoomNameOverride(body.roomName);
+            }
+
+            this.logger.info("Room %s refreshed filters (privacy=%s)", foundRoom,
+                foundRoom.privacy === RoomPrivacy.Public ? "public" : "private");
+
+            ctx.status = 200;
+            ctx.body = {
+                Success: true,
+                Game: this.getGameListing(ctx.socket.remoteAddress || "", foundRoom),
+            };
         });
 
         router.use((req, res) => {

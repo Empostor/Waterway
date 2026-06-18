@@ -1,0 +1,149 @@
+feat: game options validation, Hide & Seek manager, role system, API events, matchmaker improvements, and config updates
+
+=== Game Options Validation (src/game/GameOptions.ts) [NEW] ===
+  + GameOptionsValidator.validateGameSettings() — validates all game settings
+  + Numeric range checks: playerSpeed, killCooldown, vision, tasks, timers
+  + Enum checks: GameMap, GameKeyword, KillDistance, TaskBarMode, GameMode,
+    RulesPreset
+  + Dependency check: numEmergencies <= maxPlayers
+  + Role settings validation for all 9 roles
+  + Used in WaterwayServer.handleHostGameMessage() on room creation
+  + Used in Room constructor on player.syncsettings RPC
+
+=== Hide & Seek Game Mode Manager (src/game/modes/HideAndSeekManager.ts) [NEW] ===
+  + Full lifecycle: Hiding -> Seeking -> FinalHide -> Ended
+  + Automatic seeker selection (configured playerId or random)
+  + Hider tracking with task-completion win condition
+  + Body reports and meetings disabled during gameplay
+  + Final hide phase: seeker speed boost, position ping mechanic
+  + Player disconnect handling:
+    - Seeker leaves -> hiders win
+    - All hiders leave -> seeker wins
+  + Integrated into Room.handleStartGame() and Room.handleRpcMessage()
+  + Clean teardown on destroy / game end
+
+=== Role System (src/game/roles/) [NEW] ===
+
+  [NEW] BaseRole.ts — server-side role base class
+    + Cooldown management (startCooldown, canUseAbility, isOnCooldown)
+    + Hooks: onGameStart, onKill, onTaskComplete, onDeath, onMeetingStart,
+      onAbilityUse, onFixedUpdate, onGameEnd
+    + roleType, teamType, isActive, currentCooldown, lastAbilityUse
+
+  [NEW] NoisemakerRole.ts — crewmate, emits alert on task completion
+    + onTaskComplete(): broadcasts position reveal to nearby players
+    + Configurable alert duration and impostor visibility
+
+  [NEW] PhantomRole.ts — impostor, vanishes on death
+    + onDeath(): enters invisible ghost state instead of dying
+    + Vanish duration + cooldown from role settings
+    + Auto-dies after vanish expires
+
+  [NEW] TrackerRole.ts — crewmate, tracks a target
+    + onAbilityUse(target): starts periodic position updates
+    + Tracking duration, cooldown, and update delay from role settings
+    + Auto-stops after duration
+
+  [NEW] DetectiveRole.ts — crewmate, inspects suspects
+    + onAbilityUse(target): checks kill count, reports suspicion level
+    + suspectLimit from role settings
+    + Tracks murder records during game
+
+  [NEW] ViperRole.ts — impostor, delayed poison kills
+    + onKill(target): applies poison instead of instant kill
+    + Target dies after viperDissolveTime seconds
+    + All poisons cleared on Viper death or game end
+
+  [NEW] RoleManager.ts — role assignment and lifecycle
+    + assignRoles(): reads roleChances from settings, rolls dice per player
+    + Respects maxPlayers limits and team constraints
+    + Routes game events (kill, task, death, meeting) to correct role
+    + Plugin-extensible via static registerRole()
+
+=== New API Events (src/api/events/) [NEW] ===
+
+  [NEW] room/HideAndSeekStart.ts  — room.hideandseekstart
+        Fields: room, seekerPlayer, hiderPlayers, hideDuration
+
+  [NEW] room/HiderCaught.ts       — room.hidercaught
+        Fields: room, hiderPlayer, seekerPlayer, remainingHiders
+
+  [NEW] room/HideAndSeekEnd.ts    — room.hideandseekend
+        Fields: room, winner ("seekers"|"hiders"|"none"), reason
+
+  [NEW] player/TaskStarted.ts     — player.taskstarted
+        Fields: room, player, taskType, taskId
+
+  [NEW] player/TaskProgress.ts    — player.taskprogress
+        Fields: room, player, taskId, progress
+
+  [NEW] player/TaskCompleted.ts   — player.taskcompleted
+        Fields: room, player, taskType, taskId, isLongTask
+
+  [NEW] player/LevelChanged.ts    — player.levelchanged
+        Fields: room, player, oldLevel, newLevel
+        Emitted in Room.on("player.setlevel") handler
+
+  [NEW] player/MurderFail.ts      — player.murderfail
+        Fields: room, player (killer), target, reason, details?
+        Emitted from Room.on("player.checkmurder") when murder is invalid
+
+  [MODIFY] events/room/index.ts   — export HideAndSeekStart, HideAndSeekEnd,
+                                    HiderCaught
+  [NEW]    events/player/index.ts — export all new player events
+  [MODIFY] events/index.ts        — export player module
+
+=== HTTP Matchmaker (src/Matchmaker.ts) [MODIFY] ===
+
+  [NEW] GET / — server dashboard HTML page
+        Shows: room/player/connection/plugin counts, public room list table,
+        API endpoint reference. Dark theme, zero external CSS.
+
+  [ENHANCE] GET /api/games/:id — now returns full room info
+        + Players array: clientId, username, color, hat, skin, visor,
+          isHost, isDead
+        + GameState, GameMode, Privacy strings
+
+  [FIX] GET /api/filtertags — was stub returning [], now dynamic
+        + Scans active rooms for maps, languages, game modes
+        + Merges with configurable static filterTags from server config
+        + Returns FilterTagJson[] with Name, DisplayName, Type, Count
+
+  [NEW] POST /api/games/:id/refresh — room metadata refresh
+        + Host can update privacy and room name
+        + Returns updated GameListingJson
+
+=== Config Updates (src/WaterwayServer.ts, bin/createDefaultConfig.ts) [MODIFY] ===
+
+  [ADD] GameListingConfig.filterTags
+        Type: { name: string; displayName: string; icon?: string }[]
+        Served by GET /api/filtertags as static filter buttons
+
+  [ADD] RoomsConfig.allowedGameModes
+        Type: number[] — restrict which game modes rooms can use
+        Empty array = all modes allowed
+
+  [ADD] RoomsConfig.defaultGameMode
+        Type: number — game mode for new rooms (default 1 = Normal)
+
+  [ENHANCE] Room constructor applies enforceSettings from config on creation
+        Settings in enforceSettings cannot be overridden by host
+
+  [MODIFY] bin/createDefaultConfig.ts — all new fields with defaults
+
+=== Room Integration (src/Room.ts) [MODIFY] ===
+
+  + gameModeManager property — active game mode handler (HideAndSeekManager)
+  + roleManager property — role assignment and lifecycle
+  + Validates game options on player.syncsettings (rejects invalid)
+  + Emits PlayerLevelChangedEvent on player.setlevel
+  + Emits PlayerTaskCompletedEvent on player.completetask
+  + Emits PlayerMurderFailEvent on player.checkmurder (when !isValid)
+  + Routes kill/task/death through roleManager
+  + Routes RPCs through gameModeManager
+  + Cleanup in _reset() and destroy()
+
+=== Verification ===
+  - TypeScript compilation passes cleanly (tsc --noEmit exits 0)
+  - All events follow existing Waterway event patterns
+  - Role classes extend Waterway BaseRole (server-side), not SkeldJS BaseRole

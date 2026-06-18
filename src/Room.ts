@@ -49,6 +49,7 @@ import {
     EndGameIntent,
     GameDataMessageTag,
     GameMap,
+    GameMode,
     GameOverReason,
     GameState,
     Hat,
@@ -83,11 +84,19 @@ import {
     ClientBroadcastEvent,
     ClientLeaveEvent,
     EventTarget,
+    PlayerLevelChangedEvent,
+    PlayerMurderFailEvent,
+    PlayerTaskCompletedEvent,
+    PlayerTaskProgressEvent,
+    PlayerTaskStartedEvent,
     RoomBeforeDestroyEvent,
     RoomCreateEvent,
     RoomDestroyEvent,
     RoomGameEndEvent,
     RoomGameStartEvent,
+    RoomHideAndSeekEndEvent,
+    RoomHideAndSeekStartEvent,
+    RoomHiderCaughtEvent,
     RoomSelectHostEvent,
     getPluginEventListeners
 } from "./api";
@@ -104,6 +113,9 @@ import {
 import { UnknownComponent } from "./components";
 
 import { Logger } from "./Logger";
+import { GameOptionsValidator } from "./game/GameOptions";
+import { HideAndSeekManager } from "./game/modes/HideAndSeekManager";
+import { RoleManager } from "./game/roles/RoleManager";
 import { fmtConfigurableLog } from "./util/fmtLogFormat";
 
 import { Connection, logLanguages, logPlatforms } from "./Connection";
@@ -260,11 +272,19 @@ export enum RoomPrivacy {
 export type RoomEvents = EventMapFromList<[
     ClientBroadcastEvent,
     ClientLeaveEvent,
+    PlayerLevelChangedEvent,
+    PlayerMurderFailEvent,
+    PlayerTaskCompletedEvent,
+    PlayerTaskProgressEvent,
+    PlayerTaskStartedEvent,
     RoomBeforeDestroyEvent,
     RoomCreateEvent,
     RoomDestroyEvent,
     RoomGameEndEvent,
     RoomGameStartEvent,
+    RoomHideAndSeekEndEvent,
+    RoomHideAndSeekStartEvent,
+    RoomHiderCaughtEvent,
     RoomSelectHostEvent
 ]>;
 
@@ -314,6 +334,16 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
 
     privacy: RoomPrivacy;
 
+    /**
+     * The active game mode manager, if any (e.g., HideAndSeekManager).
+     */
+    gameModeManager: HideAndSeekManager | null;
+
+    /**
+     * The role manager for this room, handling role assignment and lifecycle.
+     */
+    roleManager: RoleManager;
+
     protected roomNameOverride: string;
     protected eventTargets: EventTarget[];
 
@@ -355,6 +385,8 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
 
         this.roomNameOverride = "";
         this.eventTargets = [];
+        this.gameModeManager = null;
+        this.roleManager = new RoleManager(this);
 
         this.lastNetId = 100000;
 
@@ -364,6 +396,18 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
         this.privacy = RoomPrivacy.Private;
 
         this.logger = new Logger(() => util.inspect(this.code, true, null, true), this.server.vorpal);
+
+        // Apply enforced settings from config (overrides host settings)
+        if (this.config.enforceSettings && Object.keys(this.config.enforceSettings).length > 0) {
+            this.settings.patch(this.config.enforceSettings);
+            this.logger.debug("Applied enforced settings to room");
+        }
+
+        // Apply default game mode if not set
+        const currentMode = this.settings.gameMode;
+        if (currentMode === undefined || currentMode === GameMode.None) {
+            (this.settings as any).gameMode = this.config.defaultGameMode || GameMode.Normal;
+        }
 
         this.on("player.setname", async ev => {
             if (ev.oldName) {
@@ -409,10 +453,36 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
         this.on("player.setlevel", async ev => {
             const connection = this.getConnection(ev.player);
             if (!connection) return;
+
+            const oldLevel = connection.playerLevel;
+            connection.playerLevel = (ev as any).newLevel ?? ev.player.playerLevel;
+
+            this.emit(new PlayerLevelChangedEvent(
+                this,
+                ev.player,
+                oldLevel,
+                connection.playerLevel
+            ));
+
             await this.updateAuthorityForClient(this.getClientAwareAuthorityId(connection), connection);
         });
 
         this.on("player.syncsettings", async ev => {
+            if (!this.canMakeHostChanges(ev.player as Player<this>)) {
+                this.logger.warn("%s attempted to change settings but is not the host", ev.player);
+                return;
+            }
+
+            const newSettings = (ev as any).newSettings || ev.settings;
+            if (newSettings) {
+                const validationResult = GameOptionsValidator.validateGameSettings(newSettings);
+                if (!validationResult.valid) {
+                    this.logger.warn("%s sent invalid game settings: %s",
+                        ev.player, validationResult.errors.join("; "));
+                    return;
+                }
+            }
+
             if (this.config.enforceSettings) {
                 ev.setSettings(this.config.enforceSettings);
             }
@@ -425,9 +495,61 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
                 this.logger.info("Meeting started (%s's body was reported)", ev.body);
             }
         });
+
+        this.on("player.completetask", async ev => {
+            const taskType = ev.task?.taskType ?? 0;
+            const taskId = ev.message?.taskIdx ?? 0;
+            this.logger.info("%s completed task (idx: %s)",
+                ev.player, taskId);
+
+            // Route through role manager for role-specific behavior
+            this.roleManager.handleTaskComplete(
+                ev.player,
+                taskType,
+                taskId
+            );
+
+            this.emit(new PlayerTaskCompletedEvent(
+                this,
+                ev.player,
+                taskType,
+                taskId,
+                false
+            ));
+        });
+
+        this.on("player.checkmurder", async ev => {
+            if (!ev.isValid) {
+                this.emit(new PlayerMurderFailEvent(
+                    this,
+                    ev.player,
+                    ev.victim,
+                    "cooldown",
+                    "Murder check determined murder is not valid"
+                ));
+            }
+        });
+
+        this.on("player.murder", async ev => {
+            this.logger.info("%s murdered %s",
+                ev.player, ev.victim);
+
+            // Route through role manager for role-specific kill behavior (e.g., Viper)
+            this.roleManager.handleKill(ev.player, ev.victim);
+        });
+
+        this.on("player.die", async ev => {
+            // Route through role manager for role-specific death behavior (e.g., Phantom)
+            this.roleManager.handleDeath(ev.player);
+        });
     }
 
     protected _reset() {
+        if (this.gameModeManager) {
+            this.gameModeManager.destroy();
+            this.gameModeManager = null;
+        }
+        this.roleManager.handleGameEnd();
         this.players.clear();
         this.networkedObjects.clear();
         this.messageStream = [];
@@ -704,6 +826,15 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
     }
 
     async handleRpcMessage(message: RpcMessage, senderPlayer: Player<Room>) {
+        // Route through game mode manager first (may block certain RPCs)
+        if (this.gameModeManager) {
+            const handled = await this.gameModeManager.handleRpc(senderPlayer, message);
+            if (!handled) {
+                // Manager blocked this RPC (e.g., body report in H&S)
+                return true;
+            }
+        }
+
         const component = this.networkedObjects.get(message.netId);
 
         if (component) {
@@ -1411,6 +1542,12 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
         this.connections.delete(leavingConnection.clientId);
         leavingConnection.room = undefined;
 
+        // Notify game mode manager of disconnect
+        const leavingPlayer = this.players.get(leavingConnection.clientId) as Player<Room> | undefined;
+        if (leavingPlayer && this.gameModeManager) {
+            await this.gameModeManager.handlePlayerDisconnect(leavingPlayer);
+        }
+
         await this.handleLeave(leavingConnection.clientId);
 
         if (this.connections.size === 0) {
@@ -1490,10 +1627,25 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
 
         await this.broadcastImmediate([], [new StartGameMessage(this.code.id)]);
 
+        // Initialize game mode-specific manager
+        if ((this.settings as any).gameMode === GameMode.HideNSeek ||
+            (this.settings as any).gameMode === GameMode.HideNSeekFools) {
+            this.gameModeManager = new HideAndSeekManager(this);
+            this.logger.info("Initialized Hide and Seek game mode manager");
+        }
+
         if (this.isAuthoritative) {
             await this.updateAllClientAwareAuthority();
             await super.handleStartGame();
             this.logger.info("Game started");
+
+            // Assign roles to players
+            this.roleManager.assignRoles();
+
+            // Start mode-specific logic after game is fully initialized
+            if (this.gameModeManager instanceof HideAndSeekManager) {
+                await this.gameModeManager.startGame();
+            }
         }
     }
 
