@@ -4,14 +4,19 @@ FROM node:22-alpine AS skeldjs-builder
 WORKDIR /skeldjs
 RUN apk add --no-cache git
 
-# Clone the SkeldJS fork
+# Clone the SkeldJS fork — uses default branch (master)
+# To specify a branch: docker build --build-arg SKELDJS_REF=my-branch .
 ARG SKELDJS_REPO=https://github.com/Empostor/SkeldJS
-ARG SKELDJS_BRANCH=main
-RUN git clone --depth 1 --branch ${SKELDJS_BRANCH} ${SKELDJS_REPO} .
+ARG SKELDJS_REF=
+RUN if [ -n "${SKELDJS_REF}" ]; then \
+        git clone --depth 1 --branch "${SKELDJS_REF}" ${SKELDJS_REPO} . ; \
+    else \
+        git clone --depth 1 ${SKELDJS_REPO} . ; \
+    fi
 
-# Install dependencies & build all packages
+# Install dependencies & build all packages (SkeldJS monorepo uses build-all)
 RUN corepack enable && yarn install
-RUN yarn build
+RUN yarn build-all
 
 # ── Stage 2: Build Waterway with local SkeldJS ──
 FROM node:22-alpine AS builder
