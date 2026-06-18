@@ -550,13 +550,16 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
             this.gameModeManager = null;
         }
         this.roleManager.handleGameEnd();
-        this.players.clear();
+        // Don't clear this.players — lobby connections stay
+        // Clear only game-specific object state (players/connections stay)
         this.networkedObjects.clear();
+        this.objectList.length = 0;
         this.messageStream = [];
-        this.authorityId = 0;
         this.settings = new GameSettings;
         this.startGameCounter = -1;
         this.privacy = RoomPrivacy.Private;
+        this.lastNetId = 100000;
+        this.ownershipGuards.clear();
     }
 
     async emit<Event extends RoomEvents[keyof RoomEvents]>(
@@ -1608,8 +1611,13 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
     }
 
     async handleStartGame(startedBy?: Player<Room>) {
+         // Reset room state if restarting after a previous game ended
+        if (this.gameState === GameState.Ended) {
+            this._reset();
+        }
+
         this.gameState = GameState.Started;
-        
+
         if (startedBy) {
             this.logger.info("Player %s requested game start, to be managed by %s",
                 startedBy, this.isAuthoritative ? "server" : (this.playerAuthority || "unknown player"));

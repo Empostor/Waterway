@@ -1,4 +1,4 @@
-fix: room privacy inverted on join, missing QuickChat in game listing
+fix: game restart state corruption, room privacy inverted, missing QuickChat
 
 === [FIX] Room Privacy Inverted (src/Room.ts) ===
   - finishJoiningGame() sent AlterGame(ChangePrivacy, 1) when room was Private
@@ -15,6 +15,14 @@ fix: room privacy inverted on join, missing QuickChat in game listing
     read from the HTTP /api/games response to determine chat mode.
   - getGameListing() now sets QuickChat from the host connection's chatMode.
   - Without this, joining clients defaulted to QuickChatOnly display.
+
+=== [FIX] Game restart state corruption (src/Room.ts) ===
+  - _reset() was not being called between games, causing Duplicate NetID
+    crash because lastNetId kept incrementing across games.
+  - handleStartGame() now calls _reset() when gameState === Ended.
+  - _reset() no longer clears this.players — lobby connections must persist.
+  - _reset() now resets: lastNetId→100000, networkedObjects, objectList,
+    roleManager, gameModeManager, ownershipGuards, messageStream, settings.
 
 === [FIX] Missing Language field in UDP GameListing (src/WaterwayServer.ts) ===
   - UDP game listing now passes room.settings.keywords as Language to the
