@@ -1416,7 +1416,7 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
                     new AlterGameMessage(
                         this.code.id,
                         AlterGameTag.ChangePrivacy,
-                        this.privacy === RoomPrivacy.Private ? 1 : 0
+                        this.privacy === RoomPrivacy.Public ? 1 : 0
                     )
                 ]
             )

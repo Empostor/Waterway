@@ -1704,7 +1704,9 @@ export class WaterwayServer extends EventEmitter<WaterwayServerEvents> {
                 continue;
 
             const roomAge = Math.floor((Date.now() - room.createdAt) / 1000);
-            const gameListing = new GameListing(
+            // NOTE: The 11-arg GameListing(language) will work once SkeldJS
+            // with the Language field lands in node_modules (via Docker COPY or npm publish).
+            const gameListing = new (GameListing as any)(
                 room.code.id,
                 listingIp,
                 this.config.socket.port,
@@ -1717,8 +1719,9 @@ export class WaterwayServer extends EventEmitter<WaterwayServerEvents> {
                 room.playerAuthority?.platform || new PlatformSpecificData(
                     Platform.Unknown,
                     "UNKNOWN"
-                )
-            );
+                ),
+                room.settings.keywords
+            ) as GameListing;
 
             if (ignoreSearchTerms === true) {
                 gamesAndRelevance.push([0, gameListing]);

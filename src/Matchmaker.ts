@@ -27,6 +27,7 @@ export type GameListingJson = {
     Platform: number;
     HostPlatformName: string;
     Language: number;
+    QuickChat: number;
     Options: string;
 }
 
@@ -375,6 +376,9 @@ export class Matchmaker {
             Platform: room.playerAuthority?.platform.platformTag || Platform.Unknown,
             HostPlatformName: room.playerAuthority?.platform.platformName || "UNKNOWN",
             Language: room.settings.keywords,
+            QuickChat: room.playerAuthority
+                ? (room.getConnection(room.playerAuthority)?.chatMode ?? QuickChatMode.FreeChat)
+                : QuickChatMode.FreeChat,
             Options: settingsWriter.toString("base64"),
         };
         return gameListing;

@@ -1,3 +1,26 @@
+fix: room privacy inverted on join, missing QuickChat in game listing
+
+=== [FIX] Room Privacy Inverted (src/Room.ts) ===
+  - finishJoiningGame() sent AlterGame(ChangePrivacy, 1) when room was Private
+    because the ternary mapped RoomPrivacy.Private(=1) -> value 1, but in the
+    Among Us protocol, value 1 means Public.
+  - Result: every newly-joined player received an initial AlterGame telling them
+    the room was public when it was actually private. Manual toggle by host
+    fixed it because handleAlterGameMessage() (correct path) was then used.
+  - Fix: change ternary from "RoomPrivacy.Private ? 1 : 0" to
+    "RoomPrivacy.Public ? 1 : 0"
+
+=== [FIX] Missing QuickChat in HTTP Matchmaker (src/Matchmaker.ts) ===
+  - GameListingJson type was missing the QuickChat field that Among Us clients
+    read from the HTTP /api/games response to determine chat mode.
+  - getGameListing() now sets QuickChat from the host connection's chatMode.
+  - Without this, joining clients defaulted to QuickChatOnly display.
+
+=== [FIX] Missing Language field in UDP GameListing (src/WaterwayServer.ts) ===
+  - UDP game listing now passes room.settings.keywords as Language to the
+    GameListing constructor (11th arg, cast to any for npm compat until
+    SkeldJS protocol update is published).
+
 feat: game options validation, Hide & Seek manager, role system, API events, matchmaker improvements, and config updates
 
 === Game Options Validation (src/game/GameOptions.ts) [NEW] ===
