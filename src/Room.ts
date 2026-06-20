@@ -1060,8 +1060,13 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
                         [player]
                     );
                 } else {
+                    // In player-authority mode, send ALL existing object spawns
+                    // (not just server-owned). The joining client needs the full
+                    // game state to avoid getting stuck on a black screen.
+                    // The host client will also send its spawn data, but sending
+                    // everything from the server ensures the client doesn't block.
                     await this.broadcastImmediate(
-                        this.getServerOwnedObjectSpawn(),
+                        this.getExistingObjectSpawn(),
                         undefined,
                         [player],
                     );
@@ -1575,6 +1580,14 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
 
         if (this.gameState === GameState.Ended) {
             if (!this.isAuthoritative && joiningClient.clientId !== this.authorityId) {
+                // Remove any stale waiting entry for this clientId (from a previous
+                // disconnected connection) before adding the new one.
+                for (const waiting of this.waitingForHost) {
+                    if (waiting.clientId === joiningClient.clientId) {
+                        this.waitingForHost.delete(waiting);
+                        break;
+                    }
+                }
                 this.waitingForHost.add(joiningClient);
 
                 await joiningClient.sendPacket(
@@ -1642,6 +1655,21 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
             await this.gameModeManager.handlePlayerDisconnect(leavingPlayer);
         }
 
+        // Collect despawn messages for the leaving player's networked objects
+        // BEFORE calling handleLeave (which removes them from our internal maps).
+        // These must be broadcast to all remaining clients so the ghost
+        // PlayerControl/PlayerInfo don't persist on other players' screens.
+        const despawnMessages: BaseGameDataMessage[] = [];
+        if (leavingPlayer) {
+            const playerInfo = leavingPlayer.getPlayerInfo();
+            if (playerInfo) {
+                despawnMessages.push(new DespawnMessage(playerInfo.netId));
+            }
+            if (leavingPlayer.characterControl) {
+                despawnMessages.push(new DespawnMessage(leavingPlayer.characterControl.netId));
+            }
+        }
+
         await this.handleLeave(leavingConnection.clientId);
 
         if (this.connections.size === 0) {
@@ -1673,6 +1701,7 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
             }
         }
 
+        // Broadcast S2CRemovePlayerMessage + object despawns to all remaining clients
         const promises = [];
         for (const [, otherClient] of this.connections) {
             promises.push(otherClient.sendPacket(
@@ -1684,7 +1713,8 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
                             leavingConnection.clientId,
                             reason,
                             this.getClientAwareAuthorityId(otherClient),
-                        )
+                        ),
+                        ...despawnMessages
                     ]
                 )
             ));
@@ -1755,11 +1785,33 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
     async handleEndGame(reason: GameOverReason, intent?: EndGameIntent) {
         const ev = await this.emit(new RoomGameEndEvent(this, reason, intent));
         if (ev.canceled) return;
-        
+
         await this.flushMessages();
 
         await this.broadcastImmediate([], [new EndGameMessage(this.code.id, reason, false)]);
         await super.handleEndGame(reason);
+
+        // Clean up stale players — players without active connections who
+        // will get new clientIds on rejoin. Prevents "4 players but shows 7" bug.
+        const staleClientIds: number[] = [];
+        for (const [clientId, player] of this.players) {
+            if (!this.connections.has(clientId)) {
+                staleClientIds.push(clientId);
+            }
+        }
+        for (const clientId of staleClientIds) {
+            this.players.delete(clientId);
+        }
+
+        // Also clean up PlayerInfo for stale players
+        for (const [playerId, playerInfo] of this.playerInfo) {
+            if (!this.connections.has(playerInfo.clientId)) {
+                this.playerInfo.delete(playerId);
+            }
+        }
+
+        // Clear waitingForHost — game is over, no host needed until next game
+        this.waitingForHost.clear();
 
         this.logger.info("Game ended: %s", GameOverReason[ev.reason]);
         await this.flushMessages();
