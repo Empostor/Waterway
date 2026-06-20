@@ -43,7 +43,7 @@ export class RoleManager {
      * Assign roles to players based on the room's role settings.
      * Called when the game starts.
      */
-    assignRoles(): void {
+    async assignRoles(): Promise<void> {
         const settings = this.room.settings;
         const roleChances = settings.roleSettings.roleChances;
 
@@ -101,7 +101,7 @@ export class RoleManager {
                 // Roll the dice
                 const roll = Math.random() * 100;
                 if (roll <= roleChance.chance) {
-                    this.assignRoleToPlayer(player, RoleCtor, roleType);
+                    await this.assignRoleToPlayer(player, RoleCtor, roleType);
                     assignedCounts[roleType]!++;
                 }
             }
@@ -121,18 +121,22 @@ export class RoleManager {
     /**
      * Create and assign a role to a specific player.
      */
-    assignRoleToPlayer(
+    async assignRoleToPlayer(
         player: Player<Room>,
         RoleCtor: new (room: Room, player: Player<Room>) => BaseRole,
         roleType: RoleType
-    ): BaseRole {
+    ): Promise<BaseRole> {
         const role = new RoleCtor(this.room, player);
         this.activeRoles.set(player.clientId, role);
 
         // The player's role is tracked by this manager
         // The client-facing role is set via PlayerControl.setRole RPC
+        // Must await — setRole is async and broadcasts the SetRole RPC to clients
         if (player.characterControl) {
-            (player.characterControl as any).setRole(roleType);
+            const roleClass = this.room.registeredRoles.get(roleType);
+            if (roleClass) {
+                await player.characterControl.setRole(roleClass);
+            }
         }
 
         // Initialize the role
