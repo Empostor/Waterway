@@ -23,8 +23,14 @@ export class DetectiveRole extends BaseRole {
     /** Records of player kills tracked by the detective. */
     private _murderRecords: Map<number, number> = new Map();
 
+    /** Remaining cooldown before next inspection (seconds). */
+    private _cooldownTimer: number = 0;
+
+    /** Whether murder listener is registered. */
+    private _murderListenerRegistered: boolean = false;
+
     get suspectLimit(): number {
-        return this.room.settings.roleSettings.detectiveSuspectLimit || 3;
+        return (this.room.settings.roleSettings as any).detectiveSuspectLimit || 3;
     }
 
     onGameStart(): void {
@@ -32,18 +38,22 @@ export class DetectiveRole extends BaseRole {
         this.inspectedCount = 0;
         this.inspectedPlayers.clear();
         this._murderRecords.clear();
+        this._cooldownTimer = 0;
+
+        // Listen for murders to track who kills
+        if (!this._murderListenerRegistered) {
+            this._murderListenerRegistered = true;
+            this.room.on("player.murder", (ev: any) => {
+                if (ev.player && ev.victim) {
+                    const killerId = ev.player.clientId;
+                    const currentCount = this._murderRecords.get(killerId) || 0;
+                    this._murderRecords.set(killerId, currentCount + 1);
+                }
+            });
+        }
 
         this.room.logger.info("%s is the Detective (suspect limit: %s)",
             this.player, this.suspectLimit);
-
-        // Listen for murders to track who kills
-        this.room.on("player.murder", (ev: any) => {
-            if (ev.player && ev.target) {
-                const killerId = ev.player.clientId;
-                const currentCount = this._murderRecords.get(killerId) || 0;
-                this._murderRecords.set(killerId, currentCount + 1);
-            }
-        });
     }
 
     /**
@@ -61,12 +71,13 @@ export class DetectiveRole extends BaseRole {
         }
 
         if (this.inspectedCount >= this.suspectLimit) {
-            this.room.logger.warn("%s (Detective) has reached the suspect limit (%s)",
+            this.room.logger.warn("%s (Detective) reached the suspect limit (%s)",
                 this.player, this.suspectLimit);
             return false;
         }
 
-        // Perform the inspection
+        if (!this.canUseAbility()) return false;
+
         this.inspectedCount++;
         this.inspectedPlayers.add(target.clientId);
 
@@ -77,7 +88,7 @@ export class DetectiveRole extends BaseRole {
         this.room.logger.info("%s (Detective) inspected %s: %s kills, isImpostor=%s",
             this.player, target, kills, isImpostor);
 
-        // Send the inspection result to the detective
+        // Send inspection result
         let resultMessage: string;
         if (kills > 0) {
             resultMessage = `<color=red>Detective report: ${target.username || "Player"} has committed ${kills} murder(s)! Highly suspicious!</color>`;
@@ -92,11 +103,17 @@ export class DetectiveRole extends BaseRole {
         return true;
     }
 
-    /**
-     * Get the number of remaining inspections available.
-     */
     get remainingInspections(): number {
         return Math.max(0, this.suspectLimit - this.inspectedCount);
+    }
+
+    onFixedUpdate(): void {
+        if (this._cooldownTimer > 0) {
+            this._cooldownTimer -= 0.1;
+            if (this._cooldownTimer <= 0) {
+                this._cooldownTimer = 0;
+            }
+        }
     }
 
     onDeath(): boolean {

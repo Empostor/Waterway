@@ -2,6 +2,7 @@ import * as chalk from "chalk";
 import * as Koa from "koa";
 import koaBody from "koa-body";
 import * as http from "http";
+import * as https from "https";
 import * as crypto from "crypto";
 
 import * as KoaRouter from "@koa/router";
@@ -12,6 +13,7 @@ import { DisconnectReason, Filters, GameKeyword, GameMap, GameMode, GameState, P
 import { WaterwayServer } from "./WaterwayServer";
 import { Room, RoomPrivacy, logMaps } from "./Room";
 import { Logger } from "./Logger";
+import { AuthCache } from "./AuthCache";
 
 export type GameListingJson = {
     IP: number;
@@ -249,9 +251,117 @@ export class Matchmaker {
     httpServer: http.Server|undefined;
     privateKey: Buffer;
 
+    /** AuthCache shared with WaterwayServer for UDP handshake matching. */
+    authCache: AuthCache;
+
     constructor(protected readonly server: WaterwayServer) {
         this.logger = new Logger(chalk.redBright("Http"), this.server.vorpal);
         this.privateKey = crypto.randomBytes(128);
+        this.authCache = new AuthCache();
+    }
+
+    /**
+     * Decode a JWT token and extract the PUID from the `sub` claim.
+     * Does NOT verify the signature — we only need the payload.
+     * JWT format: base64url(header).base64url(payload).base64url(signature)
+     */
+    extractPuidFromJwt(eosToken: string): string | null {
+        try {
+            const parts = eosToken.split(".");
+            if (parts.length !== 3) return null;
+
+            // Decode the payload (second part)
+            const payload = Buffer.from(parts[1], "base64url").toString("utf8");
+            const json = JSON.parse(payload);
+
+            // Among Us EOS tokens use `sub` for PUID
+            return json.sub || json.puid || null;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Fetch the FriendCode for a PUID from the Innersloth backend.
+     * Uses the EOS Bearer token for authorization.
+     */
+    async fetchFriendCodeFromBackend(eosToken: string, puid: string): Promise<string | null> {
+        return new Promise((resolve) => {
+            const url = "https://backend.innersloth.com/api/user/username";
+
+            const req = https.get(url, {
+                headers: {
+                    "Authorization": "Bearer " + eosToken,
+                    "User-Agent": "UnityPlayer/2022.3.44f1 (UnityWebRequest/1.0, libcurl/7.84.0-DEV)",
+                    "X-Unity-Version": "2022.3.44f1",
+                    "Accept": "application/vnd.api+json",
+                },
+                timeout: 15000,
+            }, (res) => {
+                let data = "";
+                res.on("data", (chunk: Buffer) => data += chunk.toString());
+                res.on("end", () => {
+                    try {
+                        if (res.statusCode !== 200) {
+                            this.logger.warn(
+                                "Innersloth backend returned %s for PUID %s",
+                                res.statusCode, puid
+                            );
+                            resolve(null);
+                            return;
+                        }
+
+                        const doc = JSON.parse(data);
+
+                        // JSON:API format: { data: { attributes: { username, discriminator } } }
+                        // Also support flat format: { username, discriminator }
+                        let attrs: any;
+                        if (doc.data && doc.data.attributes) {
+                            attrs = doc.data.attributes;
+                        } else {
+                            attrs = doc;
+                        }
+
+                        const username = attrs.username;
+                        const discriminator = attrs.discriminator;
+
+                        if (username && discriminator) {
+                            resolve(`${username}#${discriminator}`);
+                        } else {
+                            this.logger.warn(
+                                "Innersloth response missing username/discriminator for PUID=%s. Response: %s",
+                                puid, data.substring(0, 200)
+                            );
+                            resolve(null);
+                        }
+                    } catch (e) {
+                        this.logger.error("Error parsing Innersloth response: %s", e);
+                        resolve(null);
+                    }
+                });
+            });
+
+            req.on("error", (e) => {
+                this.logger.error("Error fetching FriendCode from backend: %s", e.message);
+                resolve(null);
+            });
+
+            req.on("timeout", () => {
+                req.destroy();
+                this.logger.warn("Timeout fetching FriendCode from backend for PUID %s", puid);
+                resolve(null);
+            });
+        });
+    }
+
+    /**
+     * Generate a fallback FriendCode from a PUID hash.
+     * Ensures the same PUID always gets the same fallback code.
+     */
+    generateFallbackFriendCode(puid: string): string {
+        const hash = crypto.createHash("sha256").update(puid).digest();
+        const discriminator = hash.readUInt16LE(0) % 10000;
+        return `Player#${discriminator.toString().padStart(4, "0")}`;
     }
 
     get port() {
@@ -651,12 +761,6 @@ export class Matchmaker {
                 return;
             }
 
-            if (typeof body.Puid !== "string") {
-                this.logger.warn("Client failed to get a matchmaker token: No 'Puid' provided in body");
-                ctx.status = 400;
-                return;
-            }
-
             if (typeof body.Username !== "string") {
                 this.logger.warn("Client failed to get a matchmaker token: No 'Username' provided in body");
                 ctx.status = 400;
@@ -683,14 +787,78 @@ export class Matchmaker {
                 return;
             }
 
-            // todo: record matchmaking tokens used
-            if (this.server.config.logging.hideSensitiveInfo) {
-                this.logger.info("Client %s got a matchmaker token", chalk.blue(body.Username));
-            } else {
-                this.logger.info("Client %s (%s) got a matchmaker token", chalk.blue(body.Username), chalk.grey(body.Puid));
+            // ── Extract PUID ──
+            // Priority: 1) Authorization header (EOS JWT Bearer token)
+            //           2) body.Puid field (legacy / direct)
+            let puid: string | null = null;
+
+            const authHeader = ctx.headers.authorization;
+            if (authHeader && authHeader.startsWith("Bearer ")) {
+                const eosToken = authHeader.substring("Bearer ".length);
+                puid = this.extractPuidFromJwt(eosToken);
+
+                if (puid) {
+                    // Fetch FriendCode from Innersloth backend
+                    let friendCode = await this.fetchFriendCodeFromBackend(eosToken, puid);
+
+                    if (!friendCode) {
+                        friendCode = this.generateFallbackFriendCode(puid);
+                        this.logger.info("Using fallback FriendCode for %s: %s", chalk.blue(body.Username), friendCode);
+                    } else {
+                        this.logger.info("Got FriendCode from backend for %s: %s", chalk.blue(body.Username), friendCode);
+                    }
+
+                    // Get client IP (support reverse proxy headers)
+                    let clientIp = ctx.socket.remoteAddress || "127.0.0.1";
+                    const xRealIp = ctx.headers["x-real-ip"] as string;
+                    const xForwardedFor = ctx.headers["x-forwarded-for"] as string;
+                    if (xRealIp) {
+                        clientIp = xRealIp;
+                    } else if (xForwardedFor) {
+                        clientIp = xForwardedFor.split(",")[0].trim();
+                    }
+                    // Normalize IPv4-mapped IPv6
+                    if (clientIp.startsWith("::ffff:")) {
+                        clientIp = clientIp.substring(7);
+                    }
+
+                    // Store in AuthCache for later UDP handshake matching
+                    this.authCache.addAuth(clientIp, body.Username, puid, friendCode, body.ClientVersion);
+
+                    if (this.server.config.logging.hideSensitiveInfo) {
+                        this.logger.info("Client %s authenticated (PUID=XXXX, FriendCode=%s)",
+                            chalk.blue(body.Username), friendCode);
+                    } else {
+                        this.logger.info("Client %s authenticated (PUID=%s, FriendCode=%s, IP=%s)",
+                            chalk.blue(body.Username), puid, friendCode, clientIp);
+                    }
+                } else {
+                    this.logger.warn("Could not extract PUID from JWT for %s", chalk.blue(body.Username));
+                }
+            } else if (typeof body.Puid === "string") {
+                // Legacy path: PUID provided directly in body
+                puid = body.Puid;
+
+                let clientIp = ctx.socket.remoteAddress || "127.0.0.1";
+                const xRealIp = ctx.headers["x-real-ip"] as string;
+                if (xRealIp) clientIp = xRealIp;
+                if (clientIp.startsWith("::ffff:")) clientIp = clientIp.substring(7);
+
+                const friendCode = this.generateFallbackFriendCode(puid!);
+                this.authCache.addAuth(clientIp, body.Username, puid!, friendCode, body.ClientVersion);
+
+                this.logger.info("Client %s got token via legacy PUID path (FriendCode=%s)",
+                    chalk.blue(body.Username), friendCode);
             }
 
-            const mmToken = this.generateMatchmakerToken(body.Puid, body.ClientVersion);
+            if (!puid) {
+                this.logger.warn("Client %s failed to get a matchmaker token: No PUID available (no Authorization header or body.Puid)", chalk.blue(body.Username));
+                ctx.status = 400;
+                ctx.body = JSON.stringify({ error: "No PUID available" });
+                return;
+            }
+
+            const mmToken = this.generateMatchmakerToken(puid, body.ClientVersion);
             ctx.status = 200;
             ctx.body = mmToken;
         });

@@ -19,6 +19,7 @@ import {
     ReadyMessage,
     ReliablePacket,
     RemoveGameMessage,
+    ReportDeadBodyMessage,
     RpcMessage,
     S2CHostGameMessage,
     S2CJoinGameMessage,
@@ -109,6 +110,7 @@ import {
     RoomPlugin,
     WorkerPlugin
 } from "./handlers";
+import { CmdHandler } from "./handlers/CmdHandler";
 
 import { UnknownComponent } from "./components";
 
@@ -344,6 +346,11 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
      */
     roleManager: RoleManager;
 
+    /**
+     * Handler for Among Us vanilla /cmd chat commands.
+     */
+    cmdHandler: CmdHandler;
+
     protected roomNameOverride: string;
     protected eventTargets: EventTarget[];
 
@@ -387,6 +394,7 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
         this.eventTargets = [];
         this.gameModeManager = null;
         this.roleManager = new RoleManager(this);
+        this.cmdHandler = new CmdHandler(this);
 
         this.lastNetId = 100000;
 
@@ -422,6 +430,13 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
         this.on("player.chat", async ev => {
             this.logger.info("%s sent message: %s",
                 ev.player, chalk.red(ev.chatMessage));
+
+            // /cmd messages are handled by the RPC intercept in handleRpcMessage
+            // (suppressed broadcast + CmdHandler processing). Skip them here.
+            if (ev.chatMessage.startsWith("/cmd")) {
+                // Still log, but don't process through regular chat command handler
+                return;
+            }
 
             const prefix = typeof this.config.chatCommands === "object"
                 ? this.config.chatCommands.prefix || "/"
@@ -494,6 +509,7 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
             } else {
                 this.logger.info("Meeting started (%s's body was reported)", ev.body);
             }
+            this.roleManager.handleMeetingStart();
         });
 
         this.on("player.completetask", async ev => {
@@ -664,6 +680,16 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
         if (this.config.createTimeout > 0 && curTime - this.createdAt > this.config.createTimeout * 1000 && !this.playerJoinedFlag) {
             this.destroy(DisconnectReason.ServerRequest);
             this.playerJoinedFlag = true;
+        }
+
+        // Tick role cooldowns and timers
+        if (this.gameState === GameState.Started) {
+            this.roleManager.handleFixedUpdate();
+        }
+
+        // Tick game mode-specific logic
+        if (this.gameModeManager && typeof (this.gameModeManager as any).handleFixedUpdate === "function") {
+            (this.gameModeManager as any).handleFixedUpdate();
         }
 
         await super.processFixedUpdate();
@@ -852,6 +878,26 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
                     await component.handleRemoteCall(parsedRpc);
                 } else {
                     await component.handleRemoteCall(message.child);
+                }
+
+                // In SaaH (authoritative) mode, ReportDeadBody is handled by the
+                // server itself — it starts the meeting and broadcasts StartMeeting.
+                // Suppress the original ReportDeadBody broadcast to prevent clients
+                // from showing a duplicate report screen / triggering conflicting meeting starts.
+                if (this.isAuthoritative && message.child instanceof ReportDeadBodyMessage) {
+                    return true;
+                }
+
+                // In SaaH mode, /cmd messages from non-host players should only
+                // be seen by the server (host). Suppress broadcast to other clients.
+                // The server processes the command and responds privately to the caller.
+                if (this.isAuthoritative && message.child instanceof SendChatMessage) {
+                    const msg = message.child.message;
+                    if (msg.startsWith("/cmd") && senderPlayer.clientId !== this.authorityId) {
+                        // Route to cmd handler — don't broadcast to other players
+                        await this.cmdHandler.handleMessage(senderPlayer, msg.substring(5));
+                        return true; // Suppress broadcast
+                    }
                 }
             } catch (e) {
                 this.logger.error("Could not process remote procedure call from player %s for component net id %s, %s: %s",
@@ -1388,7 +1434,15 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
         if (cachedPlayer)
             return cachedPlayer;
 
-        const player = new Player(this, joinInfo.clientId, joinInfo.playerName, joinInfo.platform, joinInfo.playerLevel);
+        const player = new Player(
+            this,
+            joinInfo.clientId,
+            joinInfo.playerName,
+            joinInfo.platform,
+            joinInfo.playerLevel,
+            joinInfo.friendCode || "",
+            joinInfo.puid || ""
+        );
         this.players.set(joinInfo.clientId, player);
 
         return player;
@@ -1432,8 +1486,8 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
             joiningClient.username,
             joiningClient.platform,
             joiningClient.playerLevel,
-            "", // todo: combine worker with matchmaker
-            ""
+            joiningClient.puid || "",
+            joiningClient.friendCode || ""
         );
 
         const joiningPlayer = await this.handleJoin(joinData);

@@ -9,6 +9,14 @@ import { BaseRole } from "./BaseRole";
  * "vanished" ghost state where they can continue moving invisibly for a
  * limited duration. After the duration expires, they properly die.
  *
+ * RPC flow (handled by SkeldJS PlayerControl):
+ *   1. Phantom dies → client sends CheckVanish RPC (62)
+ *   2. Host/server validates → broadcasts StartVanish RPC (63)
+ *   3. Client shows vanish animation, Phantom is invisible
+ *   4. After duration, Phantom sends CheckAppear RPC (64)
+ *   5. Host/server validates → broadcasts StartAppear RPC (65)
+ *   6. Phantom properly dies
+ *
  * This is an Impostor role.
  */
 export class PhantomRole extends BaseRole {
@@ -18,54 +26,47 @@ export class PhantomRole extends BaseRole {
     /** Whether the phantom is currently in the vanished state. */
     isVanished: boolean = false;
 
-    /** Timer for the vanish duration. */
-    private _vanishTimer: NodeJS.Timeout | null = null;
+    /** Remaining vanish duration (seconds). */
+    private _vanishTimer: number = 0;
 
-    /** Timer for the cooldown between vanish uses. */
-    private _cooldownTimer: NodeJS.Timeout | null = null;
+    /** Remaining cooldown before vanish can be used again (seconds). */
+    private _cooldownTimer: number = 0;
 
     get cooldown(): number {
-        return this.room.settings.roleSettings.phantomCooldown || 15;
+        return (this.room.settings.roleSettings as any).phantomCooldown || 15;
     }
 
     get duration(): number {
-        return this.room.settings.roleSettings.phantomDuration || 30;
+        return (this.room.settings.roleSettings as any).phantomDuration || 30;
     }
 
     onGameStart(): void {
         this.isActive = true;
+        this.isVanished = false;
+        this._vanishTimer = 0;
+        this._cooldownTimer = 0;
         this.room.logger.info("%s is the Phantom (duration: %ss, cooldown: %ss)",
             this.player, this.duration, this.cooldown);
     }
 
     /**
      * The Phantom doesn't die immediately. Instead, they enter a vanished state.
+     * Return false to prevent normal death processing.
      */
     onDeath(): boolean {
-        if (!this.isActive) return true; // Normal death
+        if (!this.isActive) return true;
 
         // Enter vanished state instead of dying
         this.isVanished = true;
+        this._vanishTimer = this.duration;
+
         this.room.logger.info("%s (Phantom) entered vanished state for %ss",
             this.player, this.duration);
 
-        // Notify the player
-        this.room.sendChat(
-            `<color=#cc66ff>${this.player.username || "Someone"} has vanished into the shadows...</color>`,
-            { targets: [...this.room.players.values()] }
-        );
-
-        // Set a timer to properly die after the duration
-        this._vanishTimer = setTimeout(() => {
-            this.endVanish();
-        }, this.duration * 1000);
-
-        // Disable the ability until cooldown
-        this.isActive = false;
-        this._cooldownTimer = setTimeout(() => {
-            this.isActive = true;
-            this.room.logger.debug("%s Phantom ability ready again", this.player);
-        }, this.cooldown * 1000);
+        // Trigger vanish via the proper RPC flow
+        if (this.player.characterControl) {
+            this.player.characterControl.vanishWithAuth();
+        }
 
         return false; // Prevent normal death
     }
@@ -73,38 +74,49 @@ export class PhantomRole extends BaseRole {
     /**
      * End the vanished state and properly kill the phantom.
      */
-    private endVanish(): void {
+    endVanish(): void {
         if (!this.isVanished) return;
 
         this.isVanished = false;
-        this.room.logger.info("%s (Phantom) vanished state ended", this.player);
+        this._vanishTimer = 0;
 
-        // Clear timer
-        if (this._vanishTimer) {
-            clearTimeout(this._vanishTimer);
-            this._vanishTimer = null;
+        // Trigger appear via the proper RPC flow
+        if (this.player.characterControl) {
+            this.player.characterControl.appearWithAuth(true);
         }
 
-        // The player actually dies now via the normal game engine mechanics
+        // Now actually die
+        const playerInfo = this.player.getPlayerInfo();
+        if (playerInfo && !playerInfo.isDead) {
+            this.player.characterControl?.causeToDie("exiled");
+        }
+
+        this._cooldownTimer = this.cooldown;
+        this.isActive = false;
+
+        this.room.logger.info("%s (Phantom) vanished state ended, now dead", this.player);
     }
 
-    /**
-     * Force-end the vanish state (e.g., game ends).
-     */
-    forceEndVanish(): void {
-        if (this._vanishTimer) {
-            clearTimeout(this._vanishTimer);
-            this._vanishTimer = null;
+    onFixedUpdate(): void {
+        if (this.isVanished && this._vanishTimer > 0) {
+            this._vanishTimer -= 0.1;
+            if (this._vanishTimer <= 0) {
+                this.endVanish();
+            }
         }
-        this.isVanished = false;
+
+        if (!this.isVanished && this._cooldownTimer > 0) {
+            this._cooldownTimer -= 0.1;
+            if (this._cooldownTimer <= 0) {
+                this._cooldownTimer = 0;
+                this.isActive = true;
+                this.room.logger.debug("%s Phantom ability ready again", this.player);
+            }
+        }
     }
 
     onGameEnd(): void {
-        this.forceEndVanish();
-        if (this._cooldownTimer) {
-            clearTimeout(this._cooldownTimer);
-            this._cooldownTimer = null;
-        }
+        this.isVanished = false;
         this.isActive = false;
     }
 }

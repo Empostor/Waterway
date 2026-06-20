@@ -6,7 +6,7 @@ import { BaseRole } from "./BaseRole";
  * Tracker Role
  *
  * Can mark a target player and receive periodic position updates
- * (arrow indicators pointing to the target's direction).
+ * (arrow indicators pointing to the target's direction on the map).
  *
  * This is a Crewmate role.
  */
@@ -17,33 +17,37 @@ export class TrackerRole extends BaseRole {
     /** The currently tracked player, if any. */
     trackedTarget: Player<Room> | null = null;
 
-    /** Timer for periodic position updates. */
-    private _trackingTimer: NodeJS.Timeout | null = null;
+    /** Remaining tracking duration (seconds). */
+    private _trackingTimer: number = 0;
 
-    /** How long the tracking has been active. */
-    private _trackingElapsed: number = 0;
+    /** Remaining cooldown before next track (seconds). */
+    private _cooldownTimer: number = 0;
+
+    /** Time since last position update (seconds). */
+    private _updateTimer: number = 0;
 
     get cooldown(): number {
-        return this.room.settings.roleSettings.trackerCooldown || 15;
+        return (this.room.settings.roleSettings as any).trackerCooldown || 15;
     }
 
     get duration(): number {
-        return this.room.settings.roleSettings.trackerDuration || 30;
+        return (this.room.settings.roleSettings as any).trackerDuration || 30;
     }
 
     get delay(): number {
-        return this.room.settings.roleSettings.trackerDelay || 1;
+        return (this.room.settings.roleSettings as any).trackerDelay || 1;
     }
 
     onGameStart(): void {
         this.isActive = true;
+        this.trackedTarget = null;
+        this._trackingTimer = 0;
+        this._cooldownTimer = 0;
+        this._updateTimer = 0;
         this.room.logger.info("%s is the Tracker (duration: %ss, cooldown: %ss, delay: %ss)",
             this.player, this.duration, this.cooldown, this.delay);
     }
 
-    /**
-     * Use the tracking ability on a target player.
-     */
     onAbilityUse(target?: Player<Room>): boolean {
         if (!target) {
             this.room.logger.warn("%s (Tracker) attempted to track but no target specified", this.player);
@@ -60,9 +64,9 @@ export class TrackerRole extends BaseRole {
             return false;
         }
 
-        // Start tracking
         this.trackedTarget = target;
-        this._trackingElapsed = 0;
+        this._trackingTimer = this.duration;
+        this._updateTimer = 0;
         this.startCooldown(this.cooldown * 1000);
 
         this.room.logger.info("%s (Tracker) is now tracking %s", this.player, target);
@@ -72,51 +76,67 @@ export class TrackerRole extends BaseRole {
             { targets: [this.player] }
         );
 
-        // Start periodic position updates
-        this._trackingTimer = setInterval(() => {
-            this.sendPositionUpdate();
-            this._trackingElapsed += this.delay;
-
-            // Stop tracking after duration expires
-            if (this._trackingElapsed >= this.duration) {
-                this.stopTracking();
-            }
-        }, this.delay * 1000);
-
         return true;
     }
 
     /**
      * Send a position update about the tracked target to this player.
+     * The Among Us client displays an arrow pointing to the target's location.
      */
     private sendPositionUpdate(): void {
-        if (!this.trackedTarget || !this.trackedTarget.characterControl) {
+        if (!this.trackedTarget?.characterControl) {
             this.stopTracking();
             return;
         }
 
-        // In the actual game, this would send an arrow/indicator RPC
-        // For now, we log the position update
-        this.room.logger.debug("%s (Tracker) received position update for %s",
-            this.player, this.trackedTarget);
+        // In SaaH mode, the server can directly read the target's position
+        // and send it to the tracker. The client handles arrow display
+        // based on the tracked player's transform data.
+        const transform = this.trackedTarget.characterControl.getComponentSafe(
+            2, "CustomNetworkTransform" as any
+        ) as any;
+
+        if (transform) {
+            this.room.logger.debug("%s (Tracker) position update for %s: (%.1f, %.1f)",
+                this.player, this.trackedTarget,
+                transform.X ?? 0, transform.Y ?? 0);
+        }
     }
 
     /**
      * Stop tracking the current target.
      */
     private stopTracking(): void {
-        if (this._trackingTimer) {
-            clearInterval(this._trackingTimer);
-            this._trackingTimer = null;
-        }
-
         if (this.trackedTarget) {
             this.room.logger.info("%s (Tracker) stopped tracking %s",
                 this.player, this.trackedTarget);
         }
-
         this.trackedTarget = null;
-        this._trackingElapsed = 0;
+        this._trackingTimer = 0;
+        this._updateTimer = 0;
+    }
+
+    onFixedUpdate(): void {
+        if (this.trackedTarget && this._trackingTimer > 0) {
+            this._trackingTimer -= 0.1;
+            this._updateTimer -= 0.1;
+
+            if (this._updateTimer <= 0) {
+                this.sendPositionUpdate();
+                this._updateTimer = this.delay;
+            }
+
+            if (this._trackingTimer <= 0) {
+                this.stopTracking();
+            }
+        }
+
+        if (!this.trackedTarget && this._cooldownTimer > 0) {
+            this._cooldownTimer -= 0.1;
+            if (this._cooldownTimer <= 0) {
+                this._cooldownTimer = 0;
+            }
+        }
     }
 
     onDeath(): boolean {

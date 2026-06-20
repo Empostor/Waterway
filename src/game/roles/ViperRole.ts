@@ -17,52 +17,37 @@ export class ViperRole extends BaseRole {
     teamType = RoleTeamType.Impostor;
 
     /** Set of poisoned player IDs awaiting dissolve. */
-    private _poisonedPlayers: Set<number> = new Set();
-
-    /** Timers for each poisoned player. */
-    private _poisonTimers: Map<number, NodeJS.Timeout> = new Map();
+    private _poisonedPlayers: Map<number, number> = new Map();
 
     get dissolveTime(): number {
-        return this.room.settings.roleSettings.viperDissolveTime || 15;
+        return (this.room.settings.roleSettings as any).viperDissolveTime || 15;
     }
 
     onGameStart(): void {
         this.isActive = true;
         this._poisonedPlayers.clear();
-        this._poisonTimers.clear();
-
         this.room.logger.info("%s is the Viper (dissolve time: %ss)",
             this.player, this.dissolveTime);
     }
 
     /**
      * When the Viper kills, the target is poisoned instead of dying immediately.
+     * Returns false to prevent normal kill processing — Viper handles it.
      */
     onKill(target: Player<Room>): boolean {
-        if (!this.isActive) return true; // Normal kill if ability inactive
+        if (!this.isActive) return true;
 
         this.room.logger.info("%s (Viper) poisoned %s (dissolve in %ss)",
             this.player, target, this.dissolveTime);
 
-        // Mark as poisoned
-        this._poisonedPlayers.add(target.clientId);
+        // Track poison with remaining time
+        this._poisonedPlayers.set(target.clientId, this.dissolveTime);
 
-        // Don't kill immediately — the dissolve timer will handle death
-        // But we still need to prevent the normal kill from processing
-        // The actual kill happens after the dissolve time
-
-        // Send a subtle message to the target
+        // Send a message to the target
         this.room.sendChat(
             `<color=#9900cc>You feel a sharp sting... something is wrong...</color>`,
             { targets: [target] }
         );
-
-        // Set the dissolve timer
-        const timer = setTimeout(() => {
-            this.dissolveTarget(target);
-        }, this.dissolveTime * 1000);
-
-        this._poisonTimers.set(target.clientId, timer);
 
         return false; // Prevent normal kill — Viper handles it
     }
@@ -71,12 +56,9 @@ export class ViperRole extends BaseRole {
      * Actually kill the poisoned target after the dissolve time.
      */
     private dissolveTarget(target: Player<Room>): void {
-        if (!this._poisonedPlayers.has(target.clientId)) return;
-
         this._poisonedPlayers.delete(target.clientId);
-        this._poisonTimers.delete(target.clientId);
 
-        // Check if the target is already dead
+        // Check if already dead
         const playerInfo = target.getPlayerInfo();
         if (playerInfo?.isDead) {
             this.room.logger.debug("%s (Viper) target %s was already dead, skipping dissolve",
@@ -86,13 +68,28 @@ export class ViperRole extends BaseRole {
 
         this.room.logger.info("%s (Viper) poison dissolved on %s", this.player, target);
 
-        // Send death message
         this.room.sendChat(
             `<color=#9900cc>${target.username || "Someone"} succumbed to poison!</color>`
         );
 
-        // The target dies via the normal game engine mechanics
-        // Poison mechanic is tracked by this role for timing
+        // Kill via normal game mechanics
+        target.characterControl?.causeToDie("exiled");
+    }
+
+    onFixedUpdate(): void {
+        for (const [playerId, remaining] of this._poisonedPlayers) {
+            const newRemaining = remaining - 0.1;
+            if (newRemaining <= 0) {
+                const target = this.room.players.get(playerId);
+                if (target) {
+                    this.dissolveTarget(target);
+                } else {
+                    this._poisonedPlayers.delete(playerId);
+                }
+            } else {
+                this._poisonedPlayers.set(playerId, newRemaining);
+            }
+        }
     }
 
     /**
@@ -103,14 +100,13 @@ export class ViperRole extends BaseRole {
     }
 
     /**
-     * Get all currently poisoned player IDs.
+     * Clear all active poisons.
      */
-    getPoisonedPlayers(): number[] {
-        return [...this._poisonedPlayers];
+    clearAllPoisons(): void {
+        this._poisonedPlayers.clear();
     }
 
     onDeath(): boolean {
-        // Clear all poison when the Viper dies
         this.clearAllPoisons();
         this.isActive = false;
         return true;
@@ -119,16 +115,5 @@ export class ViperRole extends BaseRole {
     onGameEnd(): void {
         this.clearAllPoisons();
         this.isActive = false;
-    }
-
-    /**
-     * Clear all active poisons (e.g., game over, Viper dies).
-     */
-    private clearAllPoisons(): void {
-        for (const [, timer] of this._poisonTimers) {
-            clearTimeout(timer);
-        }
-        this._poisonTimers.clear();
-        this._poisonedPlayers.clear();
     }
 }

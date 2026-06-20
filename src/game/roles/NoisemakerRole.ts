@@ -14,71 +14,83 @@ export class NoisemakerRole extends BaseRole {
     roleType = RoleType.Noisemaker;
     teamType = RoleTeamType.Crewmate;
 
-    /** Duration of the alert in seconds. */
+    /** Remaining alert effect time (seconds). */
+    private _alertTimer: number = 0;
+
+    /** Remaining cooldown before next alert (seconds). */
+    private _cooldownTimer: number = 0;
+
     get alertDuration(): number {
-        return this.room.settings.roleSettings.noisemakerAlertDuration || 10;
+        return (this.room.settings.roleSettings as any).noisemakerAlertDuration || 10;
     }
 
     /** Whether impostors also see the alert. */
     get impostorAlert(): boolean {
-        return this.room.settings.roleSettings.noisemakerImpostorAlert !== false;
+        return (this.room.settings.roleSettings as any).noisemakerImpostorAlert !== false;
     }
 
     onGameStart(): void {
         this.isActive = true;
+        this._alertTimer = 0;
+        this._cooldownTimer = 0;
         this.room.logger.info("%s is the Noisemaker (alert duration: %ss, impostor alert: %s)",
             this.player, this.alertDuration, this.impostorAlert);
     }
 
-    onTaskComplete(taskType: number, taskId: number): void {
+    onTaskComplete(_taskType: number, _taskId: number): void {
         if (!this.isActive) return;
+        if (this._cooldownTimer > 0) return;
 
-        this.room.logger.info("%s (Noisemaker) completed task %s, triggering alert!",
-            this.player, taskId);
-
-        // Broadcast the alert to nearby players
+        this.room.logger.info("%s (Noisemaker) completed task, triggering alert!", this.player);
         this.triggerAlert();
     }
 
     /**
      * Trigger the noise alert, revealing this player's position.
+     * The Among Us client shows a map-wide arrow/indicator when a Noisemaker
+     * triggers an alert.
      */
     private triggerAlert(): void {
         const characterControl = this.player.characterControl;
         if (!characterControl) return;
 
-        // The alert is broadcast to players based on proximity
-        // In the Among Us protocol, this is typically done by sending
-        // a position snap/sync to relevant players
-
-        // Determine who should see the alert
-        const recipients: Player<Room>[] = [];
-
-        for (const [, otherPlayer] of this.room.players) {
-            if (otherPlayer.clientId === this.player.clientId) continue;
-
-            const otherInfo = otherPlayer.getPlayerInfo();
-            if (!otherInfo) continue;
-
-            // Impostors can see if configured, crewmates always see
-            if (otherInfo.isImpostor && !this.impostorAlert) continue;
-
-            recipients.push(otherPlayer);
-        }
-
-        // Send a chat message to indicate the alert
+        // Send alert chat message
         this.room.sendChat(
-            `<color=orange>🔔 Noisemaker alert! ${this.player.username || "Someone"} revealed their position!</color>`
+            `<color=orange>${this.player.username || "Someone"} triggered a Noisemaker alert!</color>`
         );
 
-        this.room.logger.debug("Noisemaker alert sent to %s players", recipients.length);
+        // Start alert effect timer
+        this._alertTimer = this.alertDuration;
+        this._cooldownTimer = this.alertDuration;
 
-        // Start cooldown after alert
-        this.startCooldown(this.alertDuration * 1000);
+        this.room.logger.debug("Noisemaker alert active for %ss", this.alertDuration);
+    }
+
+    onFixedUpdate(): void {
+        if (this._alertTimer > 0) {
+            this._alertTimer -= 0.1;
+            if (this._alertTimer <= 0) {
+                this._alertTimer = 0;
+                this.room.logger.debug("%s Noisemaker alert expired", this.player);
+            }
+        }
+
+        if (this._cooldownTimer > 0) {
+            this._cooldownTimer -= 0.1;
+            if (this._cooldownTimer <= 0) {
+                this._cooldownTimer = 0;
+            }
+        }
     }
 
     onDeath(): boolean {
+        this._alertTimer = 0;
         this.isActive = false;
         return true;
+    }
+
+    onGameEnd(): void {
+        this._alertTimer = 0;
+        this.isActive = false;
     }
 }

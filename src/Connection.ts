@@ -131,6 +131,21 @@ export class Connection {
     playerLevel: number;
 
     /**
+     * EOS ProductUserId — set after UDP handshake matching against AuthCache.
+     */
+    puid: string;
+
+    /**
+     * FriendCode in username#discriminator format — from Innersloth backend.
+     */
+    friendCode: string;
+
+    /**
+     * Whether this connection has been matched to a prior TCP /api/user auth.
+     */
+    isAuthenticated: boolean;
+
+    /**
      * The last nonce that was received by this client.
      *
      * Used to prevent duplicate packets with the same nonce.
@@ -193,6 +208,9 @@ export class Connection {
         this.clientVersion = new Version(2021, 11, 9);
         this.platform = new PlatformSpecificData(Platform.Unknown, "Unknown");
         this.playerLevel = 0;
+        this.puid = "";
+        this.friendCode = "";
+        this.isAuthenticated = false;
 
         this.nextExpectedNonce = 0;
         this._incrNonce = 0;
@@ -354,6 +372,9 @@ export class Connection {
         this.clientVersion = new Version(2021, 11, 9);
         this.platform = new PlatformSpecificData(Platform.Unknown, "Unknown");
         this.playerLevel = 0;
+        this.puid = "";
+        this.friendCode = "";
+        this.isAuthenticated = false;
 
         this.server.removeConnection(this);
 

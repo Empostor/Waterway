@@ -6,11 +6,19 @@ import { PhantomRole } from "./PhantomRole";
 import { TrackerRole } from "./TrackerRole";
 import { DetectiveRole } from "./DetectiveRole";
 import { ViperRole } from "./ViperRole";
+import { ScientistRole } from "./ScientistRole";
+import { EngineerRole } from "./EngineerRole";
+import { GuardianAngelRole } from "./GuardianAngelRole";
+import { ShapeshifterRole } from "./ShapeshifterRole";
 
 /**
  * Maps role types to their implementing classes.
  */
 const ROLE_CONSTRUCTORS: Partial<Record<RoleType, new (room: Room, player: Player<Room>) => BaseRole>> = {
+    [RoleType.Scientist]: ScientistRole,
+    [RoleType.Engineer]: EngineerRole,
+    [RoleType.GuardianAngel]: GuardianAngelRole,
+    [RoleType.Shapeshifter]: ShapeshifterRole,
     [RoleType.Noisemaker]: NoisemakerRole,
     [RoleType.Phantom]: PhantomRole,
     [RoleType.Tracker]: TrackerRole,
@@ -69,6 +77,7 @@ export class RoleManager {
                 const playerInfo = player.getPlayerInfo();
                 const isImpostor = playerInfo?.isImpostor || false;
                 const isCrewmateRole = [
+                    RoleType.Crewmate,
                     RoleType.Scientist,
                     RoleType.Engineer,
                     RoleType.GuardianAngel,
@@ -78,6 +87,7 @@ export class RoleManager {
                 ].includes(roleType);
 
                 const isImpostorRole = [
+                    RoleType.Impostor,
                     RoleType.Shapeshifter,
                     RoleType.Phantom,
                     RoleType.Viper,

@@ -1492,6 +1492,29 @@ export class WaterwayServer extends EventEmitter<WaterwayServerEvents> {
         sender.platform = helloPacket.platform;
         sender.playerLevel = 0;
 
+        // ── Auth matching: associate UDP connection with prior TCP /api/user auth ──
+        // Strategy: IP + username (primary) → username only → IP only
+        const clientIp = sender.remoteInfo.address;
+        if (this.matchmaker && this.matchmaker.authCache) {
+            const cachedAuth = this.matchmaker.authCache.findBestMatch(clientIp, sender.username);
+            if (cachedAuth) {
+                sender.puid = cachedAuth.puid;
+                sender.friendCode = cachedAuth.friendCode;
+                sender.isAuthenticated = true;
+
+                if (this.config.logging.hideSensitiveInfo) {
+                    this.logger.info("%s authenticated (FriendCode=%s)",
+                        sender, cachedAuth.friendCode);
+                } else {
+                    this.logger.info("%s authenticated (PUID=%s, FriendCode=%s)",
+                        sender, cachedAuth.puid, cachedAuth.friendCode);
+                }
+
+                // Remove from cache after successful association (single-use)
+                this.matchmaker.authCache.remove(clientIp, sender.username);
+            }
+        }
+
         if (!this.isVersionAccepted(sender.clientVersion)) {
             this.logger.warn("%s connected with invalid client version: %s",
                 sender, sender.clientVersion.toString());
