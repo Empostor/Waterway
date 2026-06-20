@@ -1708,6 +1708,19 @@ export class WaterwayServer extends EventEmitter<WaterwayServerEvents> {
         await targetConnection.disconnect(message.banned ? DisconnectReason.Banned : DisconnectReason.Kicked);
     }
 
+    async handleRemovePlayerMessage(message: C2SRemovePlayerMessage, sender: Connection) {
+        // C2SRemovePlayer is sent by the host client to remove a player from the
+        // lobby. Disconnect the target player's connection.
+        if (!sender.room) return;
+
+        const targetConn = sender.room.connections.get(message.clientId);
+        if (!targetConn) return;
+
+        this.logger.info("%s removed %s from the lobby",
+            sender, targetConn);
+        await targetConn.disconnect(message.reason);
+    }
+
     async handleGetGameListMessage(message: C2SGetGameListMessage, sender: Connection) {
         const listingIp = sender.remoteInfo.address === "127.0.0.1"
             ? "127.0.0.1"
@@ -1852,6 +1865,7 @@ export class WaterwayServer extends EventEmitter<WaterwayServerEvents> {
         if (message instanceof EndGameMessage) return await this.handleEndGameMessage(message, sender);
         if (message instanceof KickPlayerMessage) return await this.handleKickPlayerMessage(message, sender);
         if (message instanceof C2SGetGameListMessage) return await this.handleGetGameListMessage(message, sender);
+        if (message instanceof C2SRemovePlayerMessage) return await this.handleRemovePlayerMessage(message, sender);
 
         if (message instanceof SetActivePodTypeMessage) {
             // not sure what to do with this..

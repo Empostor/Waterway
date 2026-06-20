@@ -588,9 +588,16 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
         }
         this.meetingInProgress = false;
         this.roleManager.handleGameEnd();
-        // Don't clear this.players — lobby connections stay
-        // Clear only game-specific object state (players/connections stay)
+
+        // Despawn all objects from the previous game (PlayerInfo, PlayerControl,
+        // ShipStatus, MeetingHud, etc.). This is the safe point to clean up since
+        // the client has already processed the EndGameMessage and built its winner
+        // list from the live PlayerInfo data.
+        for (const [, component] of this.networkedObjects) {
+            this.despawnComponent(component);
+        }
         this.networkedObjects.clear();
+        this.playerInfo.clear();
         this.objectList.length = 0;
         this.messageStream = [];
         this.settings = new GameSettings;
@@ -1792,6 +1799,10 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
     }
 
     async handleEndGame(reason: GameOverReason, intent?: EndGameIntent) {
+        // Prevent double-processing: flushEndGameIntents (server-side) and
+        // the host client's EndGameMessage may both trigger handleEndGame.
+        if (this.gameState === GameState.Ended) return;
+
         const ev = await this.emit(new RoomGameEndEvent(this, reason, intent));
         if (ev.canceled) return;
 
