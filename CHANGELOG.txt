@@ -1,0 +1,18 @@
+
+## Phase 6: 额外修复 (2026-06-20)
+
+### Room.ts — 双重会议防护
+- 新增 meetingInProgress: boolean 字段
+- player.startmeeting 事件: 检测 meetingInProgress 标志，重复触发时抑制并记录警告
+- component.despawn 事件: MeetingHud 销毁时重置 meetingInProgress = false
+- _reset(): 游戏结束时重置 meetingInProgress = false
+- processFixedUpdate(): 调用 roleManager.handleFixedUpdate() 和 gameModeManager 勾子
+
+### Room.ts — 未知RPC容错处理
+- handleRpcMessage(): 当 component.parseRemoteCall 无法解析 RPC 但 tag 已知时
+  - 降级为 warn 日志 (非 error)
+  - 仍按 acceptUnknownGameData 配置转发，不中断游戏流程
+  - 防止 SetScanner (Rpc15) 等已知但因构建/版本不匹配而解析失败的 RPC 导致游戏异常
+
+### Room.ts — /cmd 广播抑制修复
+- handleRpcMessage(): 修复返回逻辑 — /cmd 消息抑制后不广播给非目标玩家

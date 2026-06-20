@@ -342,6 +342,12 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
     gameModeManager: HideAndSeekManager | null;
 
     /**
+     * Whether a meeting is currently in progress. Prevents duplicate
+     * meeting starts from PlayerStartMeetingEvent firing multiple times.
+     */
+    meetingInProgress: boolean;
+
+    /**
      * The role manager for this room, handling role assignment and lifecycle.
      */
     roleManager: RoleManager;
@@ -393,6 +399,7 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
         this.roomNameOverride = "";
         this.eventTargets = [];
         this.gameModeManager = null;
+        this.meetingInProgress = false;
         this.roleManager = new RoleManager(this);
         this.cmdHandler = new CmdHandler(this);
 
@@ -504,6 +511,13 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
         });
 
         this.on("player.startmeeting", ev => {
+            if (this.meetingInProgress) {
+                this.logger.warn("Duplicate meeting start suppressed (body: %s, caller: %s)",
+                    ev.body, ev.player);
+                return;
+            }
+            this.meetingInProgress = true;
+
             if (ev.body === "emergency") {
                 this.logger.info("Meeting started (emergency meeting)");
             } else {
@@ -558,6 +572,13 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
             // Route through role manager for role-specific death behavior (e.g., Phantom)
             this.roleManager.handleDeath(ev.player);
         });
+
+        // Reset meetingInProgress flag when MeetingHud is despawned
+        this.on("component.despawn", (ev: any) => {
+            if (ev.component && ev.component.spawnType === SpawnType.MeetingHud) {
+                this.meetingInProgress = false;
+            }
+        });
     }
 
     protected _reset() {
@@ -565,6 +586,7 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
             this.gameModeManager.destroy();
             this.gameModeManager = null;
         }
+        this.meetingInProgress = false;
         this.roleManager.handleGameEnd();
         // Don't clear this.players — lobby connections stay
         // Clear only game-specific object state (players/connections stay)
@@ -871,8 +893,23 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
                 if (message.child instanceof UnknownRpcMessage) {
                     const parsedRpc = component.parseRemoteCall(message.child.messageTag, message.child.dataReader);
                     if (!parsedRpc) {
+                        // If the component couldn't parse this RPC but we know the tag name,
+                        // log a warning and forward it anyway (don't break game flow).
+                        const tagName = RpcMessageTag[message.child.messageTag];
+                        if (tagName) {
+                            this.logger.warn(
+                                "Component %s (netId=%s) couldn't parse RPC %s (%s) from %s — forwarding as-is",
+                                SpawnType[component.spawnType] || "Unknown",
+                                component.netId,
+                                tagName,
+                                message.child.messageTag,
+                                senderPlayer
+                            );
+                            // Forward the raw message to clients so game flow isn't broken
+                            return this.server.config.socket.acceptUnknownGameData;
+                        }
                         this.logger.error("Unknown remote procedure call from player %s for component net id %s, %s: message tag %s",
-                            senderPlayer, component.netId, SpawnType[component.spawnType] || "Unknown", RpcMessageTag[message.child.messageTag] || message.child.messageTag);
+                            senderPlayer, component.netId, SpawnType[component.spawnType] || "Unknown", tagName || message.child.messageTag);
                         return this.server.config.socket.acceptUnknownGameData;
                     }
                     await component.handleRemoteCall(parsedRpc);
