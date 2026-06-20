@@ -589,14 +589,20 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
         this.meetingInProgress = false;
         this.roleManager.handleGameEnd();
 
-        // Despawn all objects from the previous game (PlayerInfo, PlayerControl,
-        // ShipStatus, MeetingHud, etc.). This is the safe point to clean up since
-        // the client has already processed the EndGameMessage and built its winner
-        // list from the live PlayerInfo data.
+        // Only despawn server-owned objects (PlayerInfo, netId >= 100000).
+        // Client/host-owned objects (PlayerControl, ShipStatus, etc.) have
+        // netIds < 100000 and are managed by the host client in player-authority
+        // mode. Despawning them causes "non-existent component" errors when
+        // the host continues sending RPCs to now-destroyed netIds.
+        const despawning: NetworkedObject<any>[] = [];
         for (const [, component] of this.networkedObjects) {
+            if (component.netId >= 100000) {
+                despawning.push(component);
+            }
+        }
+        for (const component of despawning) {
             this.despawnComponent(component);
         }
-        this.networkedObjects.clear();
         this.playerInfo.clear();
         this.objectList.length = 0;
         this.messageStream = [];
