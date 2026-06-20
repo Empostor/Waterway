@@ -2100,7 +2100,7 @@ export class WaterwayServer extends EventEmitter<WaterwayServerEvents> {
             return connection.disconnect(DisconnectReason.Banned);
         }
 
-        if (ev.alteredRoom.connections.size >= ev.alteredRoom.settings.maxPlayers) {
+        if (ev.alteredRoom.players.size >= ev.alteredRoom.settings.maxPlayers) {
             this.logger.warn("%s attempted to join %s but it was full",
                 connection, foundRoom);
             return connection.disconnect(DisconnectReason.GameFull);

@@ -1800,31 +1800,6 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
         await this.broadcastImmediate([], [new EndGameMessage(this.code.id, reason, false)]);
         await super.handleEndGame(reason);
 
-        // Fully reset player state on game end.
-        // The previous game's Player/PlayerInfo entries are no longer valid.
-        // Players who stay in the lobby will be re-created with fresh state
-        // when the next game starts or when they rejoin.
-        const stalePlayerIds: number[] = [];
-        for (const [playerId] of this.playerInfo) {
-            stalePlayerIds.push(playerId);
-        }
-        for (const playerId of stalePlayerIds) {
-            this.playerInfo.delete(playerId);
-        }
-        // Keep only players with active connections (they'll rejoin next game).
-        // Remove stale entries whose connections have been closed.
-        const staleClientIds: number[] = [];
-        for (const [clientId] of this.players) {
-            if (!this.connections.has(clientId)) {
-                staleClientIds.push(clientId);
-            }
-        }
-        for (const clientId of staleClientIds) {
-            this.players.delete(clientId);
-        }
-
-        this.waitingForHost.clear();
-
         this.logger.info("Game ended: %s", GameOverReason[ev.reason]);
         await this.flushMessages();
         await this.updateAllClientAwareAuthority();
