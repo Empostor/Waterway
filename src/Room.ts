@@ -1587,31 +1587,13 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
 
         if (this.gameState === GameState.Ended) {
             if (!this.isAuthoritative && joiningClient.clientId !== this.authorityId) {
-                // Remove any stale waiting entry for this clientId (from a previous
-                // disconnected connection) before adding the new one.
-                for (const waiting of this.waitingForHost) {
-                    if (waiting.clientId === joiningClient.clientId) {
-                        this.waitingForHost.delete(waiting);
-                        break;
-                    }
-                }
-                this.waitingForHost.add(joiningClient);
-
-                await joiningClient.sendPacket(
-                    new ReliablePacket(
-                        joiningClient.getNextNonce(),
-                        [
-                            new WaitForHostMessage(
-                                this.code.id,
-                                joiningClient.clientId
-                            )
-                        ]
-                    )
-                );
-
-                this.logger.info("%s joined, waiting for host",
-                    joiningPlayer);
-                return;
+                // Game is over — the previous host may be gone.
+                // Auto-promote this player as the new authority instead of
+                // making them wait indefinitely.
+                this.logger.info("%s joined after game end, becoming new authority", joiningClient);
+                this.authorityId = joiningClient.clientId;
+                await joiningPlayer.emit(new PlayerSetAuthoritativeEvent(this, joiningPlayer));
+                // Fall through to normal join flow below
             }
         }
 
@@ -1748,10 +1730,9 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
     }
 
     async handleStartGame(startedBy?: Player<Room>) {
-         // Reset room state if restarting after a previous game ended
-        if (this.gameState === GameState.Ended) {
-            this._reset();
-        }
+        // Always reset — despawns objects from any previous game regardless
+        // of whether it ended cleanly or was abandoned mid-game.
+        this._reset();
 
         this.gameState = GameState.Started;
 

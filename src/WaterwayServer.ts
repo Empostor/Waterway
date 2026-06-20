@@ -2114,7 +2114,13 @@ export class WaterwayServer extends EventEmitter<WaterwayServerEvents> {
             return connection.disconnect(DisconnectReason.Banned);
         }
 
-        if (ev.alteredRoom.players.size >= ev.alteredRoom.settings.maxPlayers) {
+        // Only block if room is actually full with DIFFERENT players.
+        // A player reconnecting after game end should not be blocked by
+        // their own previous Player entry still being in the room.
+        const roomPlayerCount = ev.alteredRoom.players.size;
+        const alreadyInRoom = ev.alteredRoom.players.has(connection.clientId);
+        const effectiveCount = alreadyInRoom ? roomPlayerCount - 1 : roomPlayerCount;
+        if (effectiveCount >= ev.alteredRoom.settings.maxPlayers) {
             this.logger.warn("%s attempted to join %s but it was full",
                 connection, foundRoom);
             return connection.disconnect(DisconnectReason.GameFull);
