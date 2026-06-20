@@ -606,9 +606,8 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
         this.playerInfo.clear();
         this.objectList.length = 0;
         this.messageStream = [];
-        this.settings = new GameSettings;
+        // Don't reset settings — preserve host-configured map/mode across rounds
         this.startGameCounter = -1;
-        this.privacy = RoomPrivacy.Private;
         this.lastNetId = 100000;
         this.ownershipGuards.clear();
     }
@@ -1007,6 +1006,11 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
                 message.flags,
                 message.components.map(x => x.netId),
             );
+            // Duplicate NetID — the object already exists from a previous spawn.
+            // Silently skip (host may re-send spawns when syncing lobby state).
+            if (!object) {
+                return true;
+            }
             for (let i = 0; i < message.components.length; i++) {
                 const data = message.components[i].data;
                 const component = object.components[i];
@@ -1736,9 +1740,11 @@ export class Room extends StatefulRoom<Room, RoomEvents> {
     }
 
     async handleStartGame(startedBy?: Player<Room>) {
-        // Always reset — despawns objects from any previous game regardless
-        // of whether it ended cleanly or was abandoned mid-game.
-        this._reset();
+        // Only reset if restarting after a previous game.
+        // Don't reset on first start — lobby PlayerInfo objects are needed.
+        if (this.gameState === GameState.Ended) {
+            this._reset();
+        }
 
         this.gameState = GameState.Started;
 
